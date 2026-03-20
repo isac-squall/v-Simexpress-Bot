@@ -66,7 +66,7 @@ def _carregar_pedidos_do_arquivo(caminho_arquivo):
         return _pedidos_do_env()
 
 
-PEDIDOS_LOTE = _carregar_pedidos_do_arquivo(EXCEL_PATH)
+PEDIDOS_LOTE = _pedidos_do_env()
 
 XPATH_USUARIO = os.getenv("SIMEXPRESS_XPATH_USUARIO", "")
 XPATH_SENHA = os.getenv("SIMEXPRESS_XPATH_SENHA", "")
@@ -102,15 +102,24 @@ def main():
         with open(Path(DOWNLOAD_PATH) / "simexpress_log.txt", "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
-    # Escolhe arquivo de pedidos: CLI > EXCEL_PATH > .env fallback
-    pedidos_path = args.pedidos or EXCEL_PATH
-    if pedidos_path and os.path.exists(pedidos_path):
-        log(f"Pedidos carregados do arquivo: {pedidos_path}")
-        pedidos_text = _carregar_pedidos_do_arquivo(pedidos_path)
-    else:
-        if args.pedidos:
+    # Escolhe pedidos em ordem: CLI > .env (PEDIDOS_LOTE) > EXCEL_PATH
+    if args.pedidos:
+        pedidos_path = args.pedidos
+        if os.path.exists(pedidos_path):
+            log(f"Pedidos carregados do arquivo: {pedidos_path}")
+            pedidos_text = _carregar_pedidos_do_arquivo(pedidos_path)
+        else:
             log(f"Arquivo de pedidos não encontrado: {pedidos_path}")
-        log("Pedidos carregados do .env (fallback).")
+            log("Pedidos carregados do .env (PEDIDOS_LOTE).")
+            pedidos_text = _pedidos_do_env()
+    elif os.getenv("PEDIDOS_LOTE"):
+        log("Pedidos carregados do .env (PEDIDOS_LOTE).")
+        pedidos_text = _pedidos_do_env()
+    elif EXCEL_PATH and os.path.exists(EXCEL_PATH):
+        log(f"Pedidos carregados do arquivo padrão: {EXCEL_PATH}")
+        pedidos_text = _carregar_pedidos_do_arquivo(EXCEL_PATH)
+    else:
+        log("Nenhum arquivo de pedidos encontrado; usando .env (PEDIDOS_LOTE).")
         pedidos_text = _pedidos_do_env()
 
     # Valor final para envio ao portal

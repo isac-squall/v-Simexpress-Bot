@@ -15,7 +15,7 @@ Automação de login no https://simexpress.com.br/, navegação em Pedidos > Em 
    ```
 4. Instale:
    ```powershell
-   pip install selenium webdriver-manager python-dotenv
+   pip install selenium webdriver-manager python-dotenv openpyxl
    ```
 5. Crie `.env` com suas credenciais (exemplo abaixo)
 6. Execute:
