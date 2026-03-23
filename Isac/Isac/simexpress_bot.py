@@ -323,6 +323,23 @@ def main():
                 dest_path = dest_dir / csv_found.name
                 shutil.copy(str(csv_found), str(dest_path))
                 log(f"CSV copiado para: {dest_path}")
+
+                # Validação: verificar se os pedidos inseridos estão no CSV
+                try:
+                    df_resultado = pd.read_csv(str(dest_path))
+                    if 'Pedido Cliente' in df_resultado.columns:
+                        pedidos_encontrados = set(df_resultado['Pedido Cliente'].dropna().astype(str).str.strip())
+                        pedidos_inseridos = set(p.strip() for p in PEDIDOS_LOTE.split('\n') if p.strip())
+                        
+                        pedidos_nao_encontrados = pedidos_inseridos - pedidos_encontrados
+                        if pedidos_nao_encontrados:
+                            log(f"Aviso: Os seguintes pedidos não foram encontrados no CSV: {', '.join(pedidos_nao_encontrados)}")
+                        else:
+                            log(f"Validação OK: Todos os {len(pedidos_inseridos)} pedidos foram encontrados no CSV")
+                    else:
+                        log("Aviso: Coluna 'Pedido Cliente' não encontrada no CSV para validação")
+                except Exception as e:
+                    log(f"Erro na validação do CSV: {e}")
             else:
                 log("Aviso: nenhum arquivo CSV encontrado no diretório de downloads dentro do tempo esperado")
         except Exception as e:
