@@ -117,6 +117,17 @@ def gerar_relatorio_excel(logs, download_path, pedidos_lista):
         except Exception as e:
             print(f"Erro ao ler CSV para Excel: {e}")
     
+    # Aba Screenshot (se existir)
+    screenshot_path = Path(download_path) / "antes_csv_LOTE.png"
+    if screenshot_path.exists():
+        try:
+            from openpyxl.drawing.image import Image
+            ws_screenshot = wb.create_sheet("Screenshot")
+            img = Image(str(screenshot_path))
+            ws_screenshot.add_image(img, 'A1')
+        except Exception as e:
+            print(f"Erro ao adicionar screenshot ao Excel: {e}")
+    
     # Salvar Excel
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     excel_path = Path(download_path) / f"relatorio_simexpress_{timestamp}.xlsx"
@@ -196,6 +207,12 @@ def processar_pedido_unico(pedidos_text, download_path, log_func):
     # Criar novo driver para cada pedido (evita cache)
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--ignore-ssl-errors")
+    options.add_argument("--ignore-certificate-errors-spki-list")
+    options.add_argument("--ignore-ssl-errors-ignore-untrusted")
     prefs = {
         "download.default_directory": download_path,
         "download.prompt_for_download": False,
@@ -203,7 +220,8 @@ def processar_pedido_unico(pedidos_text, download_path, log_func):
     }
     options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver = webdriver.Chrome(service=Service("chromedriver-win32/chromedriver.exe"), options=options)
+    log_func(f"ChromeDriver version: {webdriver.__version__}")
     wait = WebDriverWait(driver, 40)
 
     def find_first(xpath_list):
@@ -392,6 +410,13 @@ def processar_pedido_unico(pedidos_text, download_path, log_func):
                             return True
                         else:
                             log_func(f"Aviso: Pedidos não encontrados no CSV: {pedidos_faltando}")
+                            # Imprimir resumo do CSV mesmo com avisos
+                            try:
+                                df = pd.read_csv(str(dest_path))
+                                log_func(f"CSV contém {len(df)} linhas de dados.")
+                                log_func(f"Colunas: {', '.join(df.columns)}")
+                            except Exception as e:
+                                log_func(f"Erro ao ler CSV para resumo: {e}")
                             return False
                     else:
                         log_func("Aviso: Coluna 'Pedido Cliente' não encontrada no CSV para validação")
@@ -407,7 +432,14 @@ def processar_pedido_unico(pedidos_text, download_path, log_func):
             return False
 
         log_func("[9/9] CSV acionado e processo concluído")
-        time.sleep(10)  # Manter navegador aberto por 10 segundos para visualização
+        # Imprimir resumo do CSV
+        try:
+            df = pd.read_csv(str(dest_path))
+            log_func(f"CSV contém {len(df)} linhas de dados.")
+            log_func(f"Colunas: {', '.join(df.columns)}")
+        except Exception as e:
+            log_func(f"Erro ao ler CSV para resumo: {e}")
+        time.sleep(30)  # Manter navegador aberto por 30 segundos para visualização
 
     except Exception as ex:
         driver.save_screenshot(str(Path(download_path) / f"simexpress_erro_{pedido_ident}.png"))
