@@ -283,7 +283,24 @@ def main():
         textarea_pedidos = wait.until(EC.visibility_of_element_located((By.XPATH, "//textarea[@id='pedidoLote' or contains(@placeholder,'cada item') or @name='pedidos'] | //textarea")))
         textarea_pedidos.clear()
         textarea_pedidos.send_keys(PEDIDOS_LOTE)
+        log(f"Textarea preenchido com: {PEDIDOS_LOTE}")
         time.sleep(2)
+
+        # Clicar no botão Consultar
+        botao_consultar = wait.until(EC.element_to_be_clickable((By.ID, "btnFiltrar")))
+        # Usar JavaScript click para evitar interceptação
+        driver.execute_script("arguments[0].click();", botao_consultar)
+        log("Botão Consultar clicado via JavaScript")
+        time.sleep(5)  # Aguardar os resultados carregarem
+
+        # Screenshot antes de clicar no botão
+        driver.save_screenshot(str(Path(DOWNLOAD_PATH) / "antes_csv.png"))
+        log("Screenshot salvo antes de clicar no botão CSV")
+
+        # Salvar page_source antes de clicar
+        with open(Path(DOWNLOAD_PATH) / "antes_csv.html", 'w', encoding='utf-8') as f:
+            f.write(driver.page_source)
+        log("Page source salvo antes de clicar no botão CSV")
 
         botao_csv = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(translate(., 'CSV', 'csv'), 'csv') or contains(., 'Download') or contains(., 'Excel')] | //a[contains(translate(., 'CSV', 'csv'), 'csv') or contains(., 'Download')]")))
         botao_csv.click()
