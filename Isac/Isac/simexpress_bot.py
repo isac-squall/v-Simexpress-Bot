@@ -14,8 +14,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import argparse
+from openpyxl import Workbook
 
-load_dotenv()
+load_dotenv(override=True)
 
 USUARIO = os.getenv("SIMEXPRESS_USUARIO")
 SENHA = os.getenv("SIMEXPRESS_SENHA")
@@ -26,8 +27,13 @@ EXCEL_PATH = os.getenv("EXCEL_PATH", str(Path(__file__).parent / "pedidos.xlsx")
 def _pedidos_do_env():
     _pedidos_raw = os.getenv("PEDIDOS_LOTE", "123456\\n234567\\n345678")
     if "\\n" in _pedidos_raw and "\n" not in _pedidos_raw:
-        return '\n'.join([p.strip() for p in _pedidos_raw.split('\\n') if p.strip()])
-    return '\n'.join([p.strip() for p in _pedidos_raw.splitlines() if p.strip()])
+        pedidos = [p.strip() for p in _pedidos_raw.split('\\n') if p.strip()]
+    else:
+        # Suporte a vírgulas ou quebras de linha
+        pedidos = []
+        for line in _pedidos_raw.splitlines():
+            pedidos.extend([p.strip() for p in line.split(',') if p.strip()])
+    return '\n'.join(pedidos)
 
 
 def _carregar_pedidos_do_arquivo(caminho_arquivo):
@@ -78,6 +84,46 @@ if not USUARIO or not SENHA:
 URL = "https://simexpress.com.br/"
 
 
+def gerar_relatorio_excel(logs, download_path, pedidos_lista):
+    wb = Workbook()
+    
+    # Aba Logs
+    ws_logs = wb.active
+    ws_logs.title = "Logs de Execução"
+    ws_logs.append(["Timestamp", "Mensagem"])
+    for log_entry in logs:
+        # Separar timestamp e mensagem
+        if " " in log_entry and log_entry.count(" ") >= 2:
+            timestamp = log_entry.split(" ", 2)[0] + " " + log_entry.split(" ", 2)[1]
+            mensagem = log_entry.split(" ", 2)[2]
+        else:
+            timestamp = ""
+            mensagem = log_entry
+        ws_logs.append([timestamp, mensagem])
+    
+    # Aba Dados do CSV (se existir)
+    csv_path = Path(download_path) / "SIMEXPRESS_LOTE.csv"
+    if csv_path.exists():
+        try:
+            df = pd.read_csv(csv_path)
+            ws_dados = wb.create_sheet("Dados CSV")
+            # Escrever cabeçalhos
+            for col_num, col_name in enumerate(df.columns, 1):
+                ws_dados.cell(row=1, column=col_num, value=col_name)
+            # Escrever dados
+            for row_num, row_data in enumerate(df.itertuples(index=False), 2):
+                for col_num, value in enumerate(row_data, 1):
+                    ws_dados.cell(row=row_num, column=col_num, value=value)
+        except Exception as e:
+            print(f"Erro ao ler CSV para Excel: {e}")
+    
+    # Salvar Excel
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    excel_path = Path(download_path) / f"relatorio_simexpress_{timestamp}.xlsx"
+    wb.save(excel_path)
+    print(f"Relatório Excel gerado: {excel_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Bot para automação Simexpress")
     parser.add_argument('--pedidos', type=str, help='Caminho para arquivo Excel/CSV com pedidos (padrão: pedidos.xlsx)')
@@ -85,20 +131,11 @@ def main():
 
     Path(DOWNLOAD_PATH).mkdir(parents=True, exist_ok=True)
 
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    prefs = {
-        "download.default_directory": DOWNLOAD_PATH,
-        "download.prompt_for_download": False,
-        "profile.default_content_setting_values.automatic_downloads": 1,
-    }
-    options.add_experimental_option("prefs", prefs)
-
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    wait = WebDriverWait(driver, 40)
+    logs = []  # Lista para coletar logs
 
     def log(msg):
         print(msg)
+        logs.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}")
         with open(Path(DOWNLOAD_PATH) / "simexpress_log.txt", "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
@@ -126,32 +163,71 @@ def main():
     global PEDIDOS_LOTE
     PEDIDOS_LOTE = pedidos_text
 
+    # Verificar se há múltiplos pedidos
+    pedidos_lista = [p.strip() for p in PEDIDOS_LOTE.split('\n') if p.strip()]
+    
+    # Sempre processar todos os pedidos de uma vez
+    log(f"Processando {len(pedidos_lista)} pedido(s): {', '.join(pedidos_lista)}")
+    try:
+        resultado = processar_pedido_unico(PEDIDOS_LOTE.strip(), DOWNLOAD_PATH, log)
+        if resultado:
+            log("Processamento concluído com sucesso.")
+        else:
+            log("Processamento concluído com avisos.")
+    except Exception as e:
+        log(f"Erro durante processamento: {e}")
+
+    # Gerar relatório em Excel
+    gerar_relatorio_excel(logs, DOWNLOAD_PATH, pedidos_lista)
+
+def _esperar_novo_csv(download_path, before_files, timeout=60):
+    for _ in range(timeout):
+        now_files = set(Path(download_path).glob('*.csv'))
+        new_files = now_files - before_files
+        if new_files:
+            return max(new_files, key=lambda p: p.stat().st_mtime)
+        time.sleep(1)
+    return None
+
+
+def processar_pedido_unico(pedidos_text, download_path, log_func):
+    pedidos_lista = [p.strip() for p in pedidos_text.split('\n') if p.strip()]
+    pedido_ident = "LOTE" if len(pedidos_lista) > 1 else pedidos_lista[0] if pedidos_lista else "UNKNOWN"
+    # Criar novo driver para cada pedido (evita cache)
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
+    prefs = {
+        "download.default_directory": download_path,
+        "download.prompt_for_download": False,
+        "profile.default_content_setting_values.automatic_downloads": 1,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    wait = WebDriverWait(driver, 40)
+
     def find_first(xpath_list):
         for xp in xpath_list:
             try:
-                # Use timeout breve por candidate para não bloquear muito tempo em cada fallback
                 el = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH, xp)))
-                log(f"Elemento encontrado com XPath: {xp}")
                 return el, xp
             except Exception:
-                log(f"Não encontrado XPath: {xp}")
                 continue
         return None, None
 
     try:
         driver.get(URL)
-        log("[1/8] P�gina inicial aberta")
+        log_func("[1/8] Página inicial aberta")
 
         try:
             btn_acesso = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Acesso ao Sistema') or contains(., 'Acesso ao Sistema') or contains(@href, 'login') or contains(@class,'acesso')]")))
             btn_acesso.click()
-            log("[2/8] Clique em Acesso ao Sistema")
+            log_func("[2/8] Clique em Acesso ao Sistema")
         except Exception as e:
-            log("[2/8] Acesso ao Sistema n�o clicado (pode j� estar login): " + str(e))
+            log_func("[2/8] Acesso ao Sistema não clicado (pode já estar login): " + str(e))
 
         if XPATH_USUARIO:
             xpath_usuario = XPATH_USUARIO
-            log(f"Usando XPATH_USUARIO personalizado: {xpath_usuario}")
         else:
             campo_usuario_el, xpath_usuario_found = find_first([
                 "//input[@name='login' or @id='login' or @name='username' or @id='username' or @name='user' or @id='user']",
@@ -162,9 +238,12 @@ def main():
                 raise RuntimeError("Campo de usuário não encontrado")
             xpath_usuario = xpath_usuario_found
 
+        driver.find_element(By.XPATH, xpath_usuario).clear()
+        driver.find_element(By.XPATH, xpath_usuario).send_keys(USUARIO)
+        log_func("[3/8] Usuário inserido")
+
         if XPATH_SENHA:
             xpath_senha = XPATH_SENHA
-            log(f"Usando XPATH_SENHA personalizado: {xpath_senha}")
         else:
             campo_senha_el, xpath_senha_found = find_first([
                 "//input[@type='password' or @name='senha' or @id='senha']",
@@ -174,9 +253,12 @@ def main():
                 raise RuntimeError("Campo de senha não encontrado")
             xpath_senha = xpath_senha_found
 
+        driver.find_element(By.XPATH, xpath_senha).clear()
+        driver.find_element(By.XPATH, xpath_senha).send_keys(SENHA)
+        log_func("[4/8] Senha inserida")
+
         if XPATH_ENTRAR:
             xpath_entrar = XPATH_ENTRAR
-            log(f"Usando XPATH_ENTRAR personalizado: {xpath_entrar}")
         else:
             botao_entrar_el, xpath_entrar_found = find_first([
                 "//button[contains(translate(., 'ENTRAR', 'entrar'), 'entrar') or contains(.,'Entrar') or contains(.,'Login') or @type='submit']",
@@ -187,7 +269,6 @@ def main():
                 "//div[contains(@class, 'login') or contains(@class, 'enter')]//button[1]",
             ])
             if not botao_entrar_el:
-                log("Fallback: tentando localizar botão 'Entrar' via JavaScript")
                 try:
                     el = driver.execute_script("""
                         var texts = ['entrar','login','acessar'];
@@ -198,65 +279,26 @@ def main():
                             if(!txt) continue;
                             for(var j=0;j<texts.length;j++){
                                 if(txt.indexOf(texts[j]) !== -1){
-                                    n.scrollIntoView();
-                                    return n;
+                                    n.click();
+                                    return true;
                                 }
                             }
                         }
-                        return null;
+                        return false;
                     """)
-                    if el:
-                        botao_entrar_el = el
-                        xpath_entrar_found = None
-                        try:
-                            tag = botao_entrar_el.tag_name
-                            text = (botao_entrar_el.text or '').strip()
-                        except Exception:
-                            tag = 'unknown'
-                            text = ''
-                        log(f"Botão encontrado via JS fallback: <{tag}> texto='{text[:80]}'")
-                    else:
-                        raise RuntimeError("Botão Entrar não encontrado (fallback JS retornou nulo)")
-                except Exception as e:
-                    raise RuntimeError(f"Botão Entrar não encontrado: {e}")
-            xpath_entrar = xpath_entrar_found
-
-        log("[3/8] Seletores de login definidos")
-
-        campo_usuario = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_usuario)))
-        campo_senha = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_senha)))
-        if botao_entrar_el is not None:
-            botao_entrar = botao_entrar_el
-        else:
-            botao_entrar = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_entrar)))
-
-        campo_usuario.clear()
-        campo_usuario.send_keys(USUARIO)
-        campo_senha.clear()
-        campo_senha.send_keys(SENHA)
-        try:
-            log("Tentando clicar no botão Entrar (click padrão)")
-            botao_entrar.click()
-        except Exception as e:
-            log(f"Click padrão falhou: {e} — tentando click via JS")
-            try:
-                driver.execute_script("arguments[0].click();", botao_entrar)
-                log("Click via JS executado com sucesso")
-            except Exception as e2:
-                # salva página e HTML para diagnóstico
-                html_path = Path(DOWNLOAD_PATH) / "simexpress_erro_page.html"
-                try:
-                    with open(html_path, 'w', encoding='utf-8') as hf:
-                        hf.write(driver.page_source)
-                    log(f"Salvo page_source em: {html_path}")
+                    if not el:
+                        raise RuntimeError("Botão Entrar não encontrado")
                 except Exception:
-                    log("Falha ao salvar page_source")
-                raise
+                    raise RuntimeError("Botão Entrar não encontrado")
+            else:
+                xpath_entrar = xpath_entrar_found
 
-        log("[4/8] Login enviado")
+        if not XPATH_ENTRAR:
+            driver.find_element(By.XPATH, xpath_entrar).click()
+        log_func("[5/8] Login enviado")
 
         wait.until(EC.url_changes(URL))
-        log("[5/8] Login confirmado - URL mudou")
+        log_func("[6/8] Login confirmado - URL mudou")
         time.sleep(2)
 
         # agora clique em Pedidos na tela pós-login
@@ -264,7 +306,7 @@ def main():
             "//a[contains(normalize-space(.),'Pedidos') or contains(translate(normalize-space(.),'PEDIDOS','pedidos'),'pedidos') or contains(@href,'pedidos') or contains(@class,'pedido')]"
         )))
         menu_pedidos.click()
-        log("[6/8] Clique em Pedidos")
+        log_func("[7/8] Clique em Pedidos")
         time.sleep(2)
 
         # o clique no menu pai pode apenas abrir submenu; aguardar o link 'Em Lote' aparecer
@@ -277,86 +319,105 @@ def main():
             "//a[contains(normalize-space(.),'Em Lote') or contains(translate(normalize-space(.),'EM LOTE','em lote'),'em lote') or contains(@href,'lote') or contains(@class,'lote')]"
         )))
         sub_em_lote.click()
-        log("[7/8] Clique em Em Lote")
+        log_func("[8/8] Clique em Em Lote")
         time.sleep(2)
+
+        # higiene de sessão local do site (limpar state de componentes, mas manter sessão)
+        driver.execute_script("window.localStorage.clear(); window.sessionStorage.clear();")
+        # NOTE: não limpar cookies após login, pois kill session e volta para login
 
         textarea_pedidos = wait.until(EC.visibility_of_element_located((By.XPATH, "//textarea[@id='pedidoLote' or contains(@placeholder,'cada item') or @name='pedidos'] | //textarea")))
         textarea_pedidos.clear()
-        textarea_pedidos.send_keys(PEDIDOS_LOTE)
-        log(f"Textarea preenchido com: {PEDIDOS_LOTE}")
-        time.sleep(2)
+        for pedido in pedidos_lista:
+            textarea_pedidos.send_keys(pedido)
+            textarea_pedidos.send_keys(Keys.RETURN)
+        log_func(f"Textarea preenchido com: {pedidos_text}")
+        time.sleep(3)
 
-        # Clicar no botão Consultar
+        # Clicar no botão Consultar e aguardar a página aplicar filtros
         botao_consultar = wait.until(EC.element_to_be_clickable((By.ID, "btnFiltrar")))
-        # Usar JavaScript click para evitar interceptação
         driver.execute_script("arguments[0].click();", botao_consultar)
-        log("Botão Consultar clicado via JavaScript")
-        time.sleep(5)  # Aguardar os resultados carregarem
+        log_func("Botão Consultar clicado via JavaScript")
+        time.sleep(10)  # Aguardar os resultados carregarem
+
+        # Limpar CSVs antigos antes de buscar o novo
+        existing_csvs = set(Path(download_path).glob('*.csv'))
+
 
         # Screenshot antes de clicar no botão
-        driver.save_screenshot(str(Path(DOWNLOAD_PATH) / "antes_csv.png"))
-        log("Screenshot salvo antes de clicar no botão CSV")
+        driver.save_screenshot(str(Path(download_path) / f"antes_csv_{pedido_ident}.png"))
 
         # Salvar page_source antes de clicar
-        with open(Path(DOWNLOAD_PATH) / "antes_csv.html", 'w', encoding='utf-8') as f:
+        with open(Path(download_path) / f"antes_csv_{pedido_ident}.html", 'w', encoding='utf-8') as f:
             f.write(driver.page_source)
-        log("Page source salvo antes de clicar no botão CSV")
 
         botao_csv = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(translate(., 'CSV', 'csv'), 'csv') or contains(., 'Download') or contains(., 'Excel')] | //a[contains(translate(., 'CSV', 'csv'), 'csv') or contains(., 'Download')]")))
+
+        # Remover CSV anteriores para evitar confusão de arquivo antigo
+        for oldf in existing_csvs:
+            try:
+                oldf.unlink()
+            except Exception:
+                pass
+
         botao_csv.click()
 
         # aguardar o arquivo CSV aparecer na pasta de downloads e copiar para workspace/downloads.csv
         try:
-            csv_found = None
-            for _ in range(30):
-                csv_files = list(Path(DOWNLOAD_PATH).glob('*.csv'))
+            csv_found = _esperar_novo_csv(download_path, existing_csvs, timeout=60)
+            if csv_found is None:
+                csv_files = list(Path(download_path).glob('*.csv'))
                 if csv_files:
-                    # escolher o mais recente
                     csv_found = max(csv_files, key=lambda p: p.stat().st_mtime)
-                    break
-                time.sleep(1)
 
-            dest_dir = Path(__file__).parent / 'downloads.csv'
+            dest_dir = Path(download_path)
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             if csv_found:
-                dest_path = dest_dir / csv_found.name
-                shutil.copy(str(csv_found), str(dest_path))
-                log(f"CSV copiado para: {dest_path}")
+                dest_path = dest_dir / f"SIMEXPRESS_{pedido_ident}.csv"
+                if str(csv_found) != str(dest_path):
+                    shutil.copy(str(csv_found), str(dest_path))
+                else:
+                    dest_path = csv_found
+                log_func(f"CSV copiado para: {dest_path}")
 
-                # Validação: verificar se os pedidos inseridos estão no CSV
+                # Validação: verificar se os pedidos aparecem no CSV
                 try:
                     df_resultado = pd.read_csv(str(dest_path))
                     if 'Pedido Cliente' in df_resultado.columns:
-                        pedidos_encontrados = set(df_resultado['Pedido Cliente'].dropna().astype(str).str.strip())
-                        pedidos_inseridos = set(p.strip() for p in PEDIDOS_LOTE.split('\n') if p.strip())
-                        
-                        pedidos_nao_encontrados = pedidos_inseridos - pedidos_encontrados
-                        if pedidos_nao_encontrados:
-                            log(f"Aviso: Os seguintes pedidos não foram encontrados no CSV: {', '.join(pedidos_nao_encontrados)}")
+                        pedidos_encontrados = set(df_resultado['Pedido Cliente'].dropna().astype(str).str.strip('"').str.strip())
+                        pedidos_faltando = [p for p in pedidos_lista if p not in pedidos_encontrados]
+                        if not pedidos_faltando:
+                            log_func(f"Validação OK: Todos os pedidos {pedidos_lista} encontrados no CSV")
+                            return True
                         else:
-                            log(f"Validação OK: Todos os {len(pedidos_inseridos)} pedidos foram encontrados no CSV")
+                            log_func(f"Aviso: Pedidos não encontrados no CSV: {pedidos_faltando}")
+                            return False
                     else:
-                        log("Aviso: Coluna 'Pedido Cliente' não encontrada no CSV para validação")
+                        log_func("Aviso: Coluna 'Pedido Cliente' não encontrada no CSV para validação")
+                        return False
                 except Exception as e:
-                    log(f"Erro na validação do CSV: {e}")
+                    log_func(f"Erro na validação do CSV: {e}")
+                    return False
             else:
-                log("Aviso: nenhum arquivo CSV encontrado no diretório de downloads dentro do tempo esperado")
+                log_func("Aviso: nenhum arquivo CSV encontrado no diretório de downloads dentro do tempo esperado")
+                return False
         except Exception as e:
-            log(f"Erro ao copiar CSV para pasta workspace: {e}")
+            log_func(f"Erro ao copiar CSV para pasta workspace: {e}")
+            return False
 
-        log("[8/8] CSV acionado e processo conclu�do")
+        log_func("[9/9] CSV acionado e processo concluído")
         time.sleep(10)  # Manter navegador aberto por 10 segundos para visualização
 
     except Exception as ex:
-        driver.save_screenshot(str(Path(DOWNLOAD_PATH) / "simexpress_erro.png"))
+        driver.save_screenshot(str(Path(download_path) / f"simexpress_erro_{pedido_ident}.png"))
         try:
-            with open(Path(DOWNLOAD_PATH) / "simexpress_erro_page.html", 'w', encoding='utf-8') as hf:
+            with open(Path(download_path) / f"simexpress_erro_{pedido_ident}_page.html", 'w', encoding='utf-8') as hf:
                 hf.write(driver.page_source)
-            log(f"Salvo page_source em: {Path(DOWNLOAD_PATH) / 'simexpress_erro_page.html'}")
+            log_func(f"Salvo page_source em: {Path(download_path) / f'simexpress_erro_{pedido_ident}_page.html'}")
         except Exception:
-            log("Falha ao salvar page_source de erro")
-        log(f"Erro durante automa��o: {ex}")
+            log_func("Falha ao salvar page_source de erro")
+        log_func(f"Erro durante automação dos pedidos {pedido_ident}: {ex}")
         raise
 
     finally:
