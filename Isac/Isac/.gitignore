@@ -11,3 +11,4 @@ build/
 dist/
 installer.iss
 innosetup.exe
+*.spec
