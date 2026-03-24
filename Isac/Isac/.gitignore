@@ -7,3 +7,7 @@ __pycache__/
 *.log
 chromedriver*.zip
 chromedriver-win32/
+build/
+dist/
+installer.iss
+innosetup.exe
